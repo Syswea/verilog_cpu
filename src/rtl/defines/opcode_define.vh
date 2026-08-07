@@ -1,0 +1,79 @@
+ //=============================================================================
+ // opcode_define.vh — RISC-V instruction opcode and funct field constants
+ //=============================================================================
+ // RV32I opcodes (inst[6:0]) and funct3/funct7 patterns.
+ //=============================================================================
+ 
+ `ifndef OPCODE_DEFINE_VH
+ `define OPCODE_DEFINE_VH
+ 
+ //-----------------------------------------------------------------------------
+ // Opcodes (inst[6:0])
+ //-----------------------------------------------------------------------------
+ 
+ `define OPCODE_LOAD      7'b0000011  // 0x03
+ `define OPCODE_MISCMEM   7'b0001111  // 0x0F
+ `define OPCODE_OPIMM     7'b0010011  // 0x13
+ `define OPCODE_AUIPC     7'b0010111  // 0x17
+ `define OPCODE_STORE     7'b0100011  // 0x23
+ `define OPCODE_OP        7'b0110011  // 0x33
+ `define OPCODE_LUI       7'b0110111  // 0x37
+ `define OPCODE_BRANCH    7'b1100011  // 0x63
+ `define OPCODE_JALR      7'b1100111  // 0x67
+ `define OPCODE_JAL       7'b1101111  // 0x6F
+ `define OPCODE_SYSTEM    7'b1110011  // 0x73
+ 
+ //-----------------------------------------------------------------------------
+ // funct3 — R-type and I-type arithmetic (OP / OPIMM)
+ //-----------------------------------------------------------------------------
+ 
+ `define FUNCT3_ADD       3'b000  // ADD / SUB / ADDI
+ `define FUNCT3_SLL       3'b001  // SLL / SLLI
+ `define FUNCT3_SLT       3'b010  // SLT / SLTI
+ `define FUNCT3_SLTU      3'b011  // SLTU / SLTIU
+ `define FUNCT3_XOR       3'b100  // XOR / XORI
+ `define FUNCT3_SR        3'b101  // SRL / SRLI / SRA / SRAI
+ `define FUNCT3_OR        3'b110  // OR / ORI
+ `define FUNCT3_AND       3'b111  // AND / ANDI
+ 
+ //-----------------------------------------------------------------------------
+ // funct3 — Branch (BRANCH)
+ //-----------------------------------------------------------------------------
+ 
+ `define FUNCT3_BEQ       3'b000
+ `define FUNCT3_BNE       3'b001
+ `define FUNCT3_BLT       3'b100
+ `define FUNCT3_BGE       3'b101
+ `define FUNCT3_BLTU      3'b110
+ `define FUNCT3_BGEU      3'b111
+ 
+ //-----------------------------------------------------------------------------
+ // funct3 — Load / Store
+ //-----------------------------------------------------------------------------
+ 
+ `define FUNCT3_LB        3'b000
+ `define FUNCT3_LH        3'b001
+ `define FUNCT3_LW        3'b010
+ `define FUNCT3_LBU       3'b100
+ `define FUNCT3_LHU       3'b101
+ 
+ `define FUNCT3_SB        3'b000
+ `define FUNCT3_SH        3'b001
+ `define FUNCT3_SW        3'b010
+ 
+ //-----------------------------------------------------------------------------
+ // funct7 patterns (inst[31:25])
+ //-----------------------------------------------------------------------------
+ 
+ `define FUNCT7_BASE      7'b0000000  // ADD, SLL, SLT, SLTU, XOR, SRL, OR, AND
+ `define FUNCT7_VARIANT   7'b0100000  // SUB, SRA, SRAI
+ 
+ //-----------------------------------------------------------------------------
+ // Memory access width (mem_width field encoding)
+ //-----------------------------------------------------------------------------
+ 
+ `define MEM_WIDTH_BYTE   2'b00
+ `define MEM_WIDTH_HALF   2'b01
+ `define MEM_WIDTH_WORD   2'b10
+ 
+ `endif // OPCODE_DEFINE_VH
