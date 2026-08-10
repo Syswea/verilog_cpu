@@ -12,17 +12,19 @@
 
 ## 当前进度
 
-**已实现（`verilator --lint-only -Isrc/rtl/defines <file>` 全部通过）：**
-- Resources：`src/rtl/resources/pc.v`、`regfile.v`
-- IF：`src/rtl/stage/if_stage/pc_next.v`、`inst_mem.v`、`src/rtl/pipeline_reg/if_id.v`
-- ID：`src/rtl/stage/id_stage/decode.v`、`src/rtl/pipeline_reg/id_ex.v`
+**已实现（`verilator --lint-only -Isrc/rtl/defines <file>` 全部通过；`src/rtl/top_core.v` 为顶层可整体编译）：**
+- Resources：`pc.v`、`regfile.v`（x0 硬连线为 0）
+- IF：`pc_next.v`（`branch_valid > stall > pc+4` 优先级）、`inst_mem.v`（ROM）、`if_id.v`
+- ID：`decode.v`（字段提取 + 立即数 + 控制信号，**控制信号唯一来源**，含 flat `alu_opcode`）、`id_ex.v`（150 位，stall 语义=灌 NOP，不存原始 funct3/funct7）
+- EX：`executor.v`（操作数 MUX + 并行恒算单元 + Branch Unit）、`alu.v` + `alu_arith/bit/cmp` 三子单元（**op_pair_\* 已废弃**，改由 `alu_src_a[1:0]`/`alu_src` 信号选操作数）
+- MEM：`ex_mem.v`（109 位）、`data_mem.v`（字数组、组合读、$readmemh 预载；MMU 预留：`i_addr` 语义=物理地址）
+- WB：`mem_wb.v`（104 位）、`wb.v`（`wb_src[1:0]` 三选一：ALU/MEM/pc+4）
+- Pipeline Ctrl：`flow_ctrl.v`（分支重定向 + 两级 flush，纯组合扇出）、`hazard_ctrl.v`（方案 A：动态 RAW stall，无 forwarding）
 - 头文件：`src/rtl/defines/{const,opcode,alu_op}_define.vh`
 
-**空占位文件（已建未实现）：** `top_core.v`、`flow_ctrl.v`（均在 `src/rtl/pipeline_*` 下）；`ex_mem.v`、`mem_wb.v` 已实现
+**待办：** testbench（`src/tbsim/` 占位）、forwarding（方案 B，hazard_ctrl.md 已设计未实现）、MMU（Sv32）、CSR/异常
 
-**尚未开始：** EX 全部（executor/alu*/op_pair_*）、`data_mem.v`、`wb.v`
-
-## 工作流程（必须遵守，详见 coding.md）
+## 工作流程（必须遵守）
 
 每个模块严格按 **设计文档 → 用户审阅 → Verilog 代码** 三步走：
 
@@ -35,10 +37,27 @@
 
 设计文档与源码目录镜像：`design_doc/rtl/stage/<stage>/<module>.md` ↔ `src/rtl/stage/<stage>/<module>.v`。
 
+### 设计文档内容要素（每个 `<module>.md` 必须覆盖）
+
+1. **概述** — 模块职责、在流水线中的位置
+2. **端口定义** — 输入/输出表，含信号名、宽度、来源/去向、说明
+3. **功能描述** — 核心行为（逻辑公式、优先级、边界条件）
+4. **实现要点** — 组合/时序、复位策略、综合注意事项
+5. **接口时序** — 关键路径，与其他模块的交互
+6. **未来扩展** — 预留接口和待完善项
+
+### 代码实现时的约束
+
+- 严格按照设计文档的端口和功能编写 `.v`
+- **禁止在 `.v` 中添加 `.md` 未定义的端口、信号或功能**；发现需求缺失先回退改 `.md`，用户确认后再改 `.v`
+- 发现设计问题时**先改 `.md` 再改 `.v`**，保持文档与代码一致
+- 涉及新常量时，同步更新 `const_define.vh`
+
 ## 编码规范
 
 - 头文件 `include` 只写文件名不带路径（如 `` `include "const_define.vh" ``）；仿真手动加 `-Isrc/rtl/defines`；头文件用 `ifndef/define/endif` 防重
 - **所有数值字面量必须用 `` `define `` 宏，模块内禁止裸数字**（无例外）；宽度派生用 `localparam` 从宏计算（如 `$clog2`）
+- 地址索引从宏派生的 `localparam` 计算，不写死 bit 范围（如 `localparam ADDR_HI = ADDR_LO + $clog2(DEPTH) - 1`），使模块随宏修改自动适配
 - 端口命名：input 前缀 `i_`，output 前缀 `o_`；每行一个信号并注释来源/去向
 - 模块内组织顺序：localparam → 寄存器声明 → initial → assign → always_comb/always_ff
 - 组合逻辑优先 `assign`/`?:` 链；`always_comb` 分支必须完整覆盖（防锁存器）
@@ -60,12 +79,12 @@
 | 区域 | 模块 |
 |------|------|
 | Resources | `pc.v`（存/更新 PC）、`regfile.v`（32 寄存器，双读单写，x0 硬连线为 0） |
-| IF | `pc_next.v`（stall > branch > pc+4 优先级）、`inst_mem.v`（ROM）、`if_id.v` |
-| ID | `decode.v`（字段提取 + 立即数 + 控制信号，**控制信号唯一来源**，含 flat `alu_opcode`）、`id_ex.v`（147 位，不存原始 funct3/funct7） |
-| EX | `executor.v`（ALU + Branch Unit，纯数据通路不译码）、`op_pair_*`（固定 (rs1,rs2)/(rs1,imm)/(pc,imm)）、`alu.v`（arith/bit/cmp 三子单元 + MUX） |
-| MEM | `ex_mem.v`、`data_mem.v` |
-| WB | `mem_wb.v`、`wb.v`（选写回源写 regfile） |
-| Pipeline Ctrl | `flow_ctrl.v`（分支重定向/flush/PC 重定向）、`hazard_ctrl.v`（stall；未来加 forwarding/load-use） |
+| IF | `pc_next.v`（branch_valid > stall > pc+4）、`inst_mem.v`（ROM）、`if_id.v` |
+| ID | `decode.v`（字段提取 + 立即数 + 控制信号，**控制信号唯一来源**，含 flat `alu_opcode`）、`id_ex.v`（150 位，不存原始 funct3/funct7，stall 灌 NOP） |
+| EX | `executor.v`（操作数 MUX：`alu_src_a[1:0]` 选 rs1/pc/0、`alu_src` 选 rs2/imm；pc+4/pc+imm/JALR 恒算单元；Branch Unit 用 `branch_sel[1:0]` 零译码判定）、`alu.v`（arith/bit/cmp 三子单元 + MUX） |
+| MEM | `ex_mem.v`、`data_mem.v`（字数组、组合读；`i_addr`=物理地址，MMU 插在 ex_mem 之后） |
+| WB | `mem_wb.v`、`wb.v`（`wb_src[1:0]` 三选一写回 regfile；pc 更新由控制面独立完成，双写解耦） |
+| Pipeline Ctrl | `flow_ctrl.v`（分支重定向/flush/PC 重定向）、`hazard_ctrl.v`（方案 A 动态 RAW stall；未来加 forwarding/load-use） |
 
 ## 设计原则
 
@@ -74,9 +93,10 @@
 3. **共享资源独立**：PC 和 RegFile 不属于任何流水线级
 4. **流水线控制独立**：hazard/flow 由独立模块处理，执行模块不得直接 stall/flush
 5. **可扩展**：预留 M 扩展、CSR、异常、中断、MMU、Cache 扩展空间
+6. **无条件并行计算、消费端门控**：EX 各运算单元恒算，结果是否生效由消费端（reg_write / branch_valid）决定
 
 ## Notes
 
 - 修改架构前先更新 `design_doc/design.md`；参考原理图 `verilog_cpu.drawio.xml`
-- 详细规范见 `coding.md`（工作流 + 编码规范全集）、`README.md`（路线图）
-- 暂无 testbench/仿真工程；`.reasonix/` 已 gitignore
+- 详细架构规范见 `design_doc/design.md`、路线图见 `README.md`
+- testbench 尚未实现（`src/tbsim/` 占位）；`.reasonix/` 已 gitignore
