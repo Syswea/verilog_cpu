@@ -73,8 +73,15 @@ module decode (
 
     always_comb begin
         case (opcode)
-            // I-type:  LOAD, OP-IMM, JALR
-            `OPCODE_LOAD,
+            // I-type: LOAD — I-immediate, ALWAYS sign-extended
+            // FIX(2026-08-10): previously grouped with OP-IMM/JALR below,
+            // whose funct3-based shamt branch wrongly zero-extended LH/LHU
+            // (funct3=001/101) negative offsets. Load offsets must never
+            // be treated as shift-amounts.
+            `OPCODE_LOAD:
+                imm = {{20{i_instruction[31]}}, i_instruction[31:20]};
+
+            // I-type: OP-IMM, JALR
             `OPCODE_OPIMM,
             `OPCODE_JALR: begin
                 case (funct3)

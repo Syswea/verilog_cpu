@@ -174,12 +174,18 @@ endmodule
 
 | 格式 | 判断条件 (opcode) | 重组方式 |
 |------|-------------------|----------|
-| I-type | LOAD / OP-IMM / JALR | `{{20{inst[31]}}, inst[31:20]}` |
+| I-type | LOAD / OP-IMM / JALR | `{{20{inst[31]}}, inst[31:20]}`（**LOAD 永远是 I 型符号扩展**，见下方缺陷修复记录） |
 | S-type | STORE | `{{20{inst[31]}}, inst[31:25], inst[11:7]}` |
 | B-type | BRANCH | `{{20{inst[31]}}, inst[7], inst[30:25], inst[11:8], 1'b0}` |
 | U-type | LUI / AUIPC | `{inst[31:12], 12'b0}` |
 | J-type | JAL | `{{12{inst[31]}}, inst[19:12], inst[20], inst[30:21], 1'b0}` |
-| shift-amt | OP-IMM 且 funct3∈{001,101} | `{27'b0, inst[24:20]}`（零扩展 5-bit shamt） |
+| shift-amt | **仅** OP-IMM 且 funct3∈{001,101} | `{27'b0, inst[24:20]}`（零扩展 5-bit shamt） |
+
+**缺陷修复记录（2026-08-10）**：早期实现将 LOAD 与 OP-IMM/JALR 共用
+`case(funct3)` 的 shamt 分支，导致 LH（funct3=001）与 LHU（funct3=101）
+的负偏移立即数被错误零扩展。已修复：`OPCODE_LOAD` 独立分支，imm 一律
+I 型符号扩展；shift-amt 分支仅保留给 OP-IMM 的 SLLI/SRLI/SRAI
+（JALR 的 funct3 恒为 000，走符号扩展分支，不受影响）。
 
 **默认行为**：未匹配时 `o_imm = 32'h0`。
 

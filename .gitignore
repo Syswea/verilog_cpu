@@ -1,1 +1,3 @@
 .reasonix
+# Verilator build artifacts
+build/
