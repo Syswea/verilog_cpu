@@ -1,13 +1,49 @@
 # Verilog CPU 项目概要
 
-## 项目目标
+在 Xilinx XC7A35T FPGA 上实现 5 级流水线 RISC-V CPU 并最终启动 Linux。
 
-实现一个 **5 级流水线 RISC-V CPU**（Verilog），最终在 Xilinx XC7A35T FPGA 上启动 Linux。
+## 项目目标（路线图）
 
-- 当前 ISA：RV32I
-- 未来扩展：RV32IMA、Zicsr、Zifencei
-- 特权级：M / S / U
-- MMU：Sv32
+1. RV32I + pipeline control（当前）
+2. RV32MA + Zicsr + Zifencei
+3. M/S/U 特权级
+4. MMU（Sv32）
+5. openSBI → 启动 Linux kernel
+
+## 当前进度
+
+**已实现（`verilator --lint-only -Isrc/rtl/defines <file>` 全部通过）：**
+- Resources：`src/rtl/resources/pc.v`、`regfile.v`
+- IF：`src/rtl/stage/if_stage/pc_next.v`、`inst_mem.v`、`src/rtl/pipeline_reg/if_id.v`
+- ID：`src/rtl/stage/id_stage/decode.v`、`src/rtl/pipeline_reg/id_ex.v`
+- 头文件：`src/rtl/defines/{const,opcode,alu_op}_define.vh`
+
+**空占位文件（已建未实现）：** `top_core.v`、`flow_ctrl.v`（均在 `src/rtl/pipeline_*` 下）；`ex_mem.v`、`mem_wb.v` 已实现
+
+**尚未开始：** EX 全部（executor/alu*/op_pair_*）、`data_mem.v`、`wb.v`
+
+## 工作流程（必须遵守，详见 coding.md）
+
+每个模块严格按 **设计文档 → 用户审阅 → Verilog 代码** 三步走：
+
+1. 写 `design_doc/rtl/.../<module>.md` 设计描述 → **停止，等待用户确认**
+2. 用户明确确认（如"可以开始写 .v"、"通过"）后 → 写 `.v`
+3. 用 `verilator --lint-only -Isrc/rtl/defines <file>.v` 检查语法
+
+**核心约束：同一轮对话中完成步骤 1 后必须停止，绝不连续执行步骤 2。**
+禁止在 `.v` 中添加 `.md` 未定义的端口/信号；发现设计问题先改 `.md` 再改 `.v`。
+
+设计文档与源码目录镜像：`design_doc/rtl/stage/<stage>/<module>.md` ↔ `src/rtl/stage/<stage>/<module>.v`。
+
+## 编码规范
+
+- 头文件 `include` 只写文件名不带路径（如 `` `include "const_define.vh" ``）；仿真手动加 `-Isrc/rtl/defines`；头文件用 `ifndef/define/endif` 防重
+- **所有数值字面量必须用 `` `define `` 宏，模块内禁止裸数字**（无例外）；宽度派生用 `localparam` 从宏计算（如 `$clog2`）
+- 端口命名：input 前缀 `i_`，output 前缀 `o_`；每行一个信号并注释来源/去向
+- 模块内组织顺序：localparam → 寄存器声明 → initial → assign → always_comb/always_ff
+- 组合逻辑优先 `assign`/`?:` 链；`always_comb` 分支必须完整覆盖（防锁存器）
+- 仿真专用代码用 `` `ifdef VERILATOR `` / `` `ifdef SIMULATION `` 包裹；Xilinx 综合属性（如 `(* ram_style = "block" *)`）以注释保留
+- 每个 `.v` 顶部写标准文件头注释（模块名 + 一句话职责 + 关键行为）
 
 ## 总体架构
 
@@ -18,70 +54,29 @@
               ↑              ↑
   IF → ID → EX → MEM → WB  ─┘
         ↑
-  Pipeline Control (flow_control.v, hazard_control.v)
+  Pipeline Control (flow_ctrl.v, hazard_ctrl.v)
 ```
 
-## 模块清单
-
-### Resources（全局共享）
-| 文件 | 职责 |
+| 区域 | 模块 |
 |------|------|
-| `pc.v` | 存储/更新 PC，接收 pc_next |
-| `regfile.v` | 32 个整数寄存器，双读口 + 单写口 |
-
-### IF Stage
-| 文件 | 职责 |
-|------|------|
-| `pc_next.v` | 计算下一条 PC（含分支重定向、stall） |
-| `inst_mem.v` | 指令存储器（ROM/Bus） |
-| `if_id.v` | IF/ID 流水线寄存器（存指令，未来加 pc/pc+4） |
-
-### ID Stage
-| 文件 | 职责 |
-|------|------|
-| `decode.v` | 统一译码模块：字段提取 + 立即数生成 + 控制信号生成（含 ALU 操作码），为控制信号唯一来源 |
-| `id_ex.v` | ID/EX 流水线寄存器（寄存器值 + 立即数 + 控制信号） |
-
-### EX Stage
-| 文件 | 职责 |
-|------|------|
-| `executor.v` | 执行单元（ALU + Branch Unit） |
-| `op_pair_rs1_rs2.v` | 操作数对模块：固定产出 (rs1_data, rs2_data) |
-| `op_pair_rs1_imm.v` | 操作数对模块：固定产出 (rs1_data, imm) |
-| `op_pair_pc_imm.v` | 操作数对模块：固定产出 (pc, imm) |
-| `alu_arith.v` | 整型算术单元（ADD / SUB） |
-| `alu_bit.v` | 位运算 + 移位单元（SLL/SRL/SRA/XOR/OR/AND） |
-| `alu_cmp.v` | 比较单元（SLT/SLTU/EQ/NE/GE/GEU） |
-| `alu.v` | 顶层 ALU 选择器（实例化上述 3 个 + MUX） |
-
-### MEM Stage
-| 文件 | 职责 |
-|------|------|
-| `ex_mem.v` | EX/MEM 流水线寄存器（ALU 结果、目标寄存器、地址、控制） |
-| `data_mem.v` | 数据存储器（load/store） |
-
-### WB Stage
-| 文件 | 职责 |
-|------|------|
-| `mem_wb.v` | MEM/WB 流水线寄存器 |
-| `wb.v` | 写回阶段，选择写回源，写入 regfile |
-
-### Pipeline Control
-| 文件 | 职责 |
-|------|------|
-| `flow_control.v` | 分支重定向、流水线 flush、PC 重定向 |
-| `hazard_control.v` | 流水线 stall，控制所有流水线寄存器；未来处理 RAW/forwarding/load-use |
+| Resources | `pc.v`（存/更新 PC）、`regfile.v`（32 寄存器，双读单写，x0 硬连线为 0） |
+| IF | `pc_next.v`（stall > branch > pc+4 优先级）、`inst_mem.v`（ROM）、`if_id.v` |
+| ID | `decode.v`（字段提取 + 立即数 + 控制信号，**控制信号唯一来源**，含 flat `alu_opcode`）、`id_ex.v`（147 位，不存原始 funct3/funct7） |
+| EX | `executor.v`（ALU + Branch Unit，纯数据通路不译码）、`op_pair_*`（固定 (rs1,rs2)/(rs1,imm)/(pc,imm)）、`alu.v`（arith/bit/cmp 三子单元 + MUX） |
+| MEM | `ex_mem.v`、`data_mem.v` |
+| WB | `mem_wb.v`、`wb.v`（选写回源写 regfile） |
+| Pipeline Ctrl | `flow_ctrl.v`（分支重定向/flush/PC 重定向）、`hazard_ctrl.v`（stall；未来加 forwarding/load-use） |
 
 ## 设计原则
 
-1. **数据通路与控制通路分离**：数据模块只算数据，控制模块只产生控制信号。
-2. **控制信号 ID 阶段集中生成**：所有控制信号在 ID 阶段一次性译码完成（含 ALU 操作码），经流水线寄存器透传至后续阶段，EX/MEM/WB 不再进行控制信号的二次解码。
-3. **共享资源独立**：PC 和 RegFile 不属于任何流水线级。
-4. **流水线控制独立**：hazard/flow 控制由独立模块处理，执行模块不应直接 stall/flush。
-5. **可扩展**：架构设计预留了 M 扩展、CSR、异常、中断、MMU、Cache 的扩展空间。
+1. **数据通路与控制通路分离**：数据模块只算数据，控制模块只产生控制信号
+2. **控制信号 ID 阶段集中生成**：decode.v 一次性译码，经流水线寄存器透传，EX/MEM/WB 不二次解码
+3. **共享资源独立**：PC 和 RegFile 不属于任何流水线级
+4. **流水线控制独立**：hazard/flow 由独立模块处理，执行模块不得直接 stall/flush
+5. **可扩展**：预留 M 扩展、CSR、异常、中断、MMU、Cache 扩展空间
 
-## 开发约定
+## Notes
 
-- 按上述架构增量实现各 Verilog 模块
-- 修改架构前先更新 [design_doc/design.md](design_doc/design.md)
-- 参考原理图：[verilog_cpu.drawio.xml](verilog_cpu.drawio.xml)
+- 修改架构前先更新 `design_doc/design.md`；参考原理图 `verilog_cpu.drawio.xml`
+- 详细规范见 `coding.md`（工作流 + 编码规范全集）、`README.md`（路线图）
+- 暂无 testbench/仿真工程；`.reasonix/` 已 gitignore

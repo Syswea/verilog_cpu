@@ -13,9 +13,9 @@
 | 端口名 | 方向 | 宽度 | 来源 | 说明 |
 |--------|------|------|------|------|
 | `i_pc` | input | 32 | `pc.v` | 当前 PC 值 |
-| `i_branch_target` | input | 32 | `flow_control.v` | 分支/跳转目标地址 |
-| `i_branch_valid` | input | 1 | `flow_control.v` | 分支/跳转有效标志 |
-| `i_stall` | input | 1 | `hazard_control.v` | 流水线暂停信号，高有效 |
+| `i_branch_target` | input | 32 | `flow_ctrl.v` | 分支/跳转目标地址 |
+| `i_branch_valid` | input | 1 | `flow_ctrl.v` | 分支/跳转有效标志 |
+| `i_stall` | input | 1 | `hazard_ctrl.v` | 流水线暂停信号，高有效 |
 
 ### 输出
 
@@ -71,7 +71,7 @@ else                     o_pc_next = i_pc + 32'd4;    // 正常递增
 
 - 属于 IF Stage，详见 [if_stage.md](../if_stage.md)
 - PC 寄存器由 `resources/pc.v` 实现，`pc_next.v` 只负责计算
-- 分支信号来自 [flow_control.v](../../../src/rtl/pipeline_ctrl/flow_crtl.v)，stall 来自 [hazard_control.v](../../../src/rtl/pipeline_ctrl/hazard_crtl.v)
+- 分支信号来自 [flow_ctrl.v](../../../src/rtl/pipeline_ctrl/flow_ctrl.v)，stall 来自 [hazard_ctrl.v](../../../src/rtl/pipeline_ctrl/hazard_ctrl.v)
 
 ## 未来扩展
 

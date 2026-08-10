@@ -1,83 +1,99 @@
-# EX Stage 设计描述
+# EX Stage 设计描述（修订版 v2）
 
 ## 概述
 
 EX（Execute）Stage 是 5 级流水线的第三级，负责执行所有算术/逻辑/比较运算以及分支跳转判定。**本级是纯数据通路，不含任何控制信号生成逻辑**——所有控制信号已在 ID Stage 的 `decode.v` 中一次性生成，经 `id_ex.v` 透传至本级直接消费。
 
-本级仅包含一个模块：
+**v2 修订要点**（相对 v1）：
 
-- `executor.v` — 纯数据通路执行单元（ALU + Branch Unit + 控制透传）
+- 按运算类别平铺**并行运算单元**：一个指令的所有运算同一拍并行完成，由选择信号 `alu_src_a` / `alu_src` 选出操作数，各单元无状态、无串行复用。
+- 明确**无条件并行计算、消费端门控**原则：所有运算单元恒算，结果是否生效由消费端（寄存器写使能 / PC 更新）决定，EX 内不做条件计算。
+- **废弃 `op_pair_*.v`（3 个文件）**：操作数组合不再用固定配对模块，改为 executor 内由 `alu_src_a[1:0]` / `alu_src` 直接驱动 MUX 选出 `alu_a` / `alu_b`。
+- 新增 **pc+4 链接地址单元**（JAL/JALR 写回）与 **JALR 目标单元**（`(rs1+imm) & ~1`，跳转目标在 EX 内自闭环）。
+- 分支判定改用独立的 **`i_branch_sel[1:0]`**（区分无/条件分支/JAL/JALR），不再用 `alu_opcode` 推断，消除二次解码。
+- `alu_arith` 接口统一为 `(i_a, i_b, i_opcode, o_result)`，分支目标加法器 `pc+imm` 独立为 executor 级恒算单元。
 
 ## 模块组成
 
 ```
                       id_ex.v (Pipeline Register)
                           │
-           ┌──────────────┼──────────────┐
-           │ pc, rs1, rs2, imm           │ (控制总线)
-           ▼              ▼              ▼
-┌──────────────────────────────────────────────────────────┐
-│  executor.v                                              │
-│                                                          │
-│  ┌────────────────────┐  ┌────────────────────┐          │
-│  │ op_pair_rs1_rs2.v  │  │ op_pair_pc_imm.v   │          │
-│  │  o_a = rs1_data    │  │  o_a = pc          │          │
-│  │  o_b = rs2_data    │  │  o_b = imm         │          │
-│  └────────┬───────────┘  └────────┬───────────┘          │
-│           │ (rs1, rs2)            │ (pc, imm)             │
-│  ┌────────────────────┐           │                       │
-│  │ op_pair_rs1_imm.v  │           │                       │
-│  │  o_a = rs1_data    │           │                       │
-│  │  o_b = imm         │           │                       │
-│  └────────┬───────────┘           │                       │
-│           │ (rs1, imm)            │                       │
-│           │         ┌─────────────┘                       │
-│           │         │                                     │
-│  ┌────────┴────┬────┴───────┬────────────┐               │
-│  │  alu.v      │            │            │               │
-│  │  ┌──────────┴──┐  ┌──────┴─────┐  ┌──┴────────────┐  │
-│  │  │ alu_arith.v │  │ alu_bit.v  │  │  alu_cmp.v    │  │
-│  │  │  ADD / SUB  │  │ SLL/SRL/   │  │ EQ/NE/        │  │
-│  │  │             │  │ SRA/XOR/   │  │ SLT/SLTU/     │  │
-│  │  │ o_branch_   │  │ OR/AND     │  │ GE/GEU        │  │
-│  │  │ target      │  └──────┬─────┘  └──────┬────────┘  │
-│  │  │ (pc+imm)    │         │                │           │
-│  │  └──────┬──────┘         │                │           │
-│  │         └────────┬───────┴────────┬───────┘           │
-│  │                  │ alu.v (MUX)    │                   │
-│  │               alu_result          │                   │
-│  └──────────────────┬────────────────┘                   │
-│                     │                                    │
-│   branch_target ────┤                                    │
-│         ┌───────────┴──────────┐                         │
-│         │    Branch Unit       │                         │
-│         │   (condition eval)   │                         │
-│         └──────────┬───────────┘                         │
-│                    │ branch_taken                        │
-└────────────────────┼──────────────┬──────────────────────┘
-                     │              │
-                     ▼              ▼
-                flow_control.v  ex_mem.v
-             (branch_taken,   (ALU result,
-              branch_target)   store data,
-                               透传控制)
+           ┌──────────────┼──────────────────────────┐
+           │ pc, rs1, rs2, imm, rd                   │
+           │ alu_opcode, alu_src_a[1:0], alu_src     │ (控制总线)
+           │ branch_sel[1:0], wb_src[1:0], mem_*     │
+           ▼              ▼                          ▼
+┌──────────────────────────────────────────────────────────────┐
+│  executor.v                                                  │
+│                                                              │
+│  ┌────────────────────── 操作数选择 MUX ──────────────────┐  │
+│  │  alu_a = rs1 | pc | 0   (alu_src_a[1:0])              │  │
+│  │  alu_b = rs2 | imm      (alu_src)                     │  │
+│  └──────────┬───────────────────────────────┬────────────┘  │
+│             │ alu_a, alu_b                  │ 固定输入        │
+│  ┌──────────┴───────────┐         ┌─────────┴──────────────┐ │
+│  │  alu.v               │         │ pc+4 单元              │ │
+│  │  ├─ alu_arith (加减) │         │ pc+imm 目标加法器       │ │
+│  │  ├─ alu_bit   (位运算)│         │ JALR 单元 (rs1+imm&~1) │ │
+│  │  └─ alu_cmp   (判断)  │         └─────────┬──────────────┘ │
+│  └──────────┬───────────┘                   │                │
+│             │ alu_result                    │                │
+│  ┌──────────┴───────────┐                   │                │
+│  │   Branch Unit        │◄──────────────────┘                │
+│  │  (branch_sel 判定)    │                                    │
+│  └──────────┬───────────┘                                    │
+│             │ branch_taken / branch_target                   │
+│  ┌──────────┴───────────┐                                    │
+│  │ 控制透传（含 wb_src） │                                    │
+│  └──────────────────────┘                                    │
+└─────────────┬───────────────────────────────────────────────┘
+              │
+   ┌──────────┼─────────────────┬────────────────┐
+   ▼          ▼                 ▼                ▼
+flow_ctrl ex_mem.v       ex_mem.v         ex_mem.v
+(branch_taken,(alu_result,   (o_rs2_data,     (o_pc_plus4,
+ branch_target) o_rd_addr)    mem_* 透传)      wb_src, reg_write)
 ```
 
-**三个操作数对模块（`op_pair_*.v`）始终并行运行**：`op_pair_rs1_rs2.v`、`op_pair_rs1_imm.v`、`op_pair_pc_imm.v` 各自固定产出一种操作数组合，无需控制信号。`alu.v` 根据 `opcode` 为各子模块选择对应的操作数对。分支时，`alu_cmp` 使用 `(rs1, rs2)` 做比较，`alu_arith` 的 `o_branch_target` 使用 `(pc, imm)` 做加法——两者同时产出，不存在冲突。
+### 模块清单
 
+| 文件 | 职责 |
+|------|------|
+| `executor.v` | EX 顶层：操作数选择 MUX、pc+4 单元、分支目标加法器、JALR 单元、Branch Unit、控制透传 |
+| `alu.v` | ALU 顶层选择器：实例化 3 个子单元，按 `i_opcode` 选择结果 |
+| `alu_arith.v` | 加减单元（ADD / SUB） |
+| `alu_bit.v` | 位运算单元（SLL/SRL/SRA/XOR/OR/AND） |
+| `alu_cmp.v` | 判断单元（SLT/SLTU/EQ/NE/GE/GEU，布尔输出） |
 
+> 原 v1 的 `op_pair_rs1_rs2.v` / `op_pair_rs1_imm.v` / `op_pair_pc_imm.v` 三个文件**废弃**，操作数组合改由选择信号驱动 MUX 完成。
 
-2. **ALU 计算**：执行算术、逻辑、移位、比较运算（16 种操作码）
-3. **分支判定**：根据 `alu_opcode` 判定分支是否 taken，计算跳转目标地址
-4. **控制透传**：将 MEM/WB 控制信号原样传递给 `ex_mem.v`
+## 运算单元总览
 
-**不包含**：寄存器、控制译码、状态机。
+一个指令所需的全部运算**并行平铺**，各单元独立、同时产出，由信号选通结果：
+
+| 单元 | 实现位置 | 输入 | 输出 | 覆盖指令 | 说明 |
+|------|---------|------|------|---------|------|
+| pc+4 单元 | executor 内 | `i_pc` | `o_pc_plus4` | JAL, JALR | 链接地址，供 WB 写回 rd |
+| 加减单元 | `alu_arith.v` | `alu_a`, `alu_b`, `opcode` | result | R-type ADD/SUB、ADDI、LOAD/STORE 地址、LUI、AUIPC | 结果由 opcode 门控 |
+| 位运算单元 | `alu_bit.v` | `alu_a`, `alu_b`, `opcode` | result | SLL/SRL/SRA/XOR/OR/AND 及 I 型（shift 量取 `i_b[4:0]`） | |
+| 判断单元 | `alu_cmp.v` | `alu_a`, `alu_b`, `opcode` | result（0/1） | SLT/SLTU/EQ/NE/GE/GEU 及 I 型、BRANCH | 布尔输出，供写回与分支判定 |
+| JALR 目标单元 | executor 内 | `i_rs1_data`, `i_imm` | `jalr_target` | JALR | `(rs1 + imm) & ~1`，低位对齐 |
+| 分支目标加法器 | executor 内 | `i_pc`, `i_imm` | `pc_plus_imm` | JAL, BRANCH | 恒算，不受 opcode 影响 |
+
+**为什么需要独立的分支目标加法器**：BRANCH 指令时判断单元需要 `(rs1, rs2)` 做比较，而跳转目标需要 `(pc, imm)`——两组操作数同时需要，而 `alu_a`/`alu_b` 只有一组。故 `pc+imm` 必须独立恒算，与 ALU 并行。
+
+**无条件并行计算与消费端门控**：所有单元始终恒算，即使当前指令不使用其结果（如 BEQ 不跳时目标加法器仍在计算 `pc+imm`）。结果的"生效"由消费端门控决定：
+
+- 寄存器堆写入：由 `reg_write` + `wb_src` 门控（WB 阶段消费）
+- PC 更新：由 `branch_taken` 门控，决定取 `branch_target` 还是 `pc+4`（flow_ctrl 消费）
+
+计算与门控解耦，各单元关键路径互不级联——判断与目标加法并行，无"先比较再算加法"的串行依赖。
 
 ---
 
-#### 1.1 端口定义
+## 1.1 端口定义
 
-**输入**
+### 输入
 
 | 信号 | 宽度 | 来源 | 说明 |
 |------|------|------|------|
@@ -85,25 +101,28 @@ EX（Execute）Stage 是 5 级流水线的第三级，负责执行所有算术/�
 | `i_rs1_data` | 32 | id_ex.v (o_rs1_data) | rs1 读出值 |
 | `i_rs2_data` | 32 | id_ex.v (o_rs2_data) | rs2 读出值 / Store 数据 |
 | `i_imm` | 32 | id_ex.v (o_imm) | 32 位符号扩展立即数 |
-| `i_rd_addr` | 5 | id_ex.v (o_rd_addr) | 目标寄存器地址 |
-| `i_alu_opcode` | 4 | id_ex.v (o_alu_opcode) | ALU 运算类型（扁平编码） |
-| `i_branch` | 1 | id_ex.v (o_branch) | 是否为分支/跳转指令 |
-| `i_mem_read` | 1 | id_ex.v (o_mem_read) | 读 Memory（透传） |
-| `i_mem_write` | 1 | id_ex.v (o_mem_write) | 写 Memory（透传） |
-| `i_mem_width` | 2 | id_ex.v (o_mem_width) | 访存宽度（透传） |
-| `i_mem_sext` | 1 | id_ex.v (o_mem_sext) | 符号扩展（透传） |
-| `i_mem_to_reg` | 1 | id_ex.v (o_mem_to_reg) | 写回源选择（透传） |
-| `i_reg_write` | 1 | id_ex.v (o_reg_write) | 寄存器写使能（透传） |
+| `i_rd_addr` | 5 | id_ex.v (o_rd_addr) | 目标寄存器地址（透传） |
+| `i_alu_opcode` | 4 | id_ex.v (o_alu_opcode) | ALU 运算类型（扁平编码，见 `alu_op_define.vh`） |
+| `i_alu_src_a` | **2** | id_ex.v (o_alu_src_a) | A 端口选择：`ALU_A_RS1` / `ALU_A_PC` / `ALU_A_ZERO`（**v1 为 1 bit，已扩宽**） |
+| `i_alu_src` | 1 | id_ex.v (o_alu_src) | B 端口选择：0=rs2、1=imm |
+| `i_branch_sel` | **2** | id_ex.v (o_branch_sel) | 分支类型：`BRANCH_NONE` / `BRANCH_COND` / `BRANCH_JAL` / `BRANCH_JALR`（**取代 v1 的 1 bit `i_branch`**） |
+| `i_mem_read` | 1 | id_ex.v | 读 Memory（透传） |
+| `i_mem_write` | 1 | id_ex.v | 写 Memory（透传） |
+| `i_mem_width` | 2 | id_ex.v | 访存宽度（透传） |
+| `i_mem_sext` | 1 | id_ex.v | 符号扩展（透传） |
+| `i_wb_src` | **2** | id_ex.v | 写回源选择：`WB_SRC_ALU` / `WB_SRC_MEM` / `WB_SRC_PC_PLUS4`（**取代 v1 的 1 bit `i_mem_to_reg`**） |
+| `i_reg_write` | 1 | id_ex.v | 寄存器写使能（透传） |
 
-**输出——数据通路（→ ex_mem.v）**
+### 输出——数据通路（→ ex_mem.v）
 
-| 信号 | 宽度 | 去向 | 说明 |
-|------|------|------|------|
-| `o_alu_result` | 32 | ex_mem.v | ALU 计算结果 |
-| `o_rs2_data` | 32 | ex_mem.v | Store 数据（透传，供 MEM Stage 写入内存） |
-| `o_rd_addr` | 5 | ex_mem.v | 目标寄存器地址（透传） |
+| 信号 | 宽度 | 说明 |
+|------|------|------|
+| `o_alu_result` | 32 | ALU 计算结果 |
+| `o_pc_plus4` | **32** | 链接地址（JAL/JALR 写回值，**v2 新增**） |
+| `o_rs2_data` | 32 | Store 数据（透传） |
+| `o_rd_addr` | 5 | 目标寄存器地址（透传） |
 
-**输出——控制透传（→ ex_mem.v）**
+### 输出——控制透传（→ ex_mem.v）
 
 | 信号 | 宽度 | 说明 |
 |------|------|------|
@@ -111,134 +130,108 @@ EX（Execute）Stage 是 5 级流水线的第三级，负责执行所有算术/�
 | `o_mem_write` | 1 | 写 Memory（透传） |
 | `o_mem_width` | 2 | 访存宽度（透传） |
 | `o_mem_sext` | 1 | 符号扩展（透传） |
-| `o_mem_to_reg` | 1 | 写回源选择（透传） |
+| `o_wb_src` | 2 | 写回源选择（透传，v2 新增） |
 | `o_reg_write` | 1 | 寄存器写使能（透传） |
 
-**输出——分支信息（→ flow_control.v）**
+### 输出——分支信息（→ flow_ctrl.v）
 
-| 信号 | 宽度 | 去向 | 说明 |
-|------|------|------|------|
-| `o_branch_taken` | 1 | flow_control.v | 分支/跳转是否 taken |
-| `o_branch_target` | 32 | flow_control.v | 跳转目标地址（用于 PC 重定向） |
-
----
-
-#### 1.2 内部结构
-
-```
-executor.v 内部:
-
-  // ---- 操作数对模块 (并行, 见 §1.3) ----
-  wire [31:0] pair_rs1_rs2_a, pair_rs1_rs2_b;  // (rs1, rs2)
-  wire [31:0] pair_rs1_imm_a, pair_rs1_imm_b;  // (rs1, imm)
-  wire [31:0] pair_pc_imm_a,  pair_pc_imm_b;   // (pc,  imm)
-
-  op_pair_rs1_rs2 u_op_rs1_rs2 (.i_rs1_data, .i_rs2_data,
-      .o_a(pair_rs1_rs2_a), .o_b(pair_rs1_rs2_b));
-  op_pair_rs1_imm u_op_rs1_imm (.i_rs1_data, .i_imm,
-      .o_a(pair_rs1_imm_a), .o_b(pair_rs1_imm_b));
-  op_pair_pc_imm  u_op_pc_imm  (.i_pc, .i_imm,
-      .o_a(pair_pc_imm_a),  .o_b(pair_pc_imm_b));
-
-  // ---- ALU (4 子模块, 见 §1.4) ----
-  alu u_alu (
-      .pair_rs1_rs2_a, .pair_rs1_rs2_b,
-      .pair_rs1_imm_a, .pair_rs1_imm_b,
-      .pair_pc_imm_a,  .pair_pc_imm_b,
-      .i_opcode (i_alu_opcode),
-      .o_result (o_alu_result),
-      .o_branch_target (branch_target)
-  );
-
-  // ---- 分支判定 ----
-  Branch Unit:
-    根据 i_alu_opcode 和 ALU 结果判定 o_branch_taken
-```
+| 信号 | 宽度 | 说明 |
+|------|------|------|
+| `o_branch_taken` | 1 | 分支/跳转是否 taken |
+| `o_branch_target` | 32 | 跳转目标地址（JAL/BRANCH 为 `pc+imm`，JALR 为 `(rs1+imm)&~1`，**EX 内已闭环**） |
 
 ---
 
-#### 1.3 操作数对模块（3 个 *.v）
-
-RV32I 指令使用的源操作数仅有三种组合。三个独立 `.v` 文件各管一对，**始终并行产出**，无控制信号：
-
-| 模块 | 文件 | `o_a` | `o_b` | 典型指令 |
-|------|------|-------|-------|----------|
-| 寄存器对 | `op_pair_rs1_rs2.v` | `i_rs1_data` | `i_rs2_data` | R-type, BRANCH (比较) |
-| 立即数对 | `op_pair_rs1_imm.v` | `i_rs1_data` | `i_imm` | I-type, LOAD, STORE, JALR |
-| PC 立即数对 | `op_pair_pc_imm.v` | `i_pc` | `i_imm` | AUIPC, JAL, BRANCH (目标) |
-
-每个模块为纯 wire 连接（组合逻辑），接口统一：
+## 1.2 内部结构（executor.v）
 
 ```verilog
-module op_pair_xxx (
-    input  wire [31:0] i_rs1_data,  // (rs1_rs2 和 rs1_imm 使用)
-    input  wire [31:0] i_rs2_data,  // (仅 rs1_rs2 使用)
-    input  wire [31:0] i_pc,        // (仅 pc_imm 使用)
-    input  wire [31:0] i_imm,       // (rs1_imm 和 pc_imm 使用)
-    output wire [31:0] o_a,
-    output wire [31:0] o_b
+// ---- 操作数选择 MUX（取代 v1 的 op_pair_*.v）----
+// alu_src_a: 00=rs1, 01=pc, 10=zero(LUI)
+// alu_src:   0=rs2, 1=imm
+wire [31:0] alu_a = (i_alu_src_a == `ALU_A_PC)   ? i_pc       :
+                    (i_alu_src_a == `ALU_A_ZERO) ? `XLEN_ZERO :
+                                                   i_rs1_data;
+wire [31:0] alu_b = i_alu_src ? i_imm : i_rs2_data;
+
+// ---- 并行运算单元（全部恒算，无 opcode 门控）----
+wire [31:0] pc_plus4    = i_pc + `PC_INCREMENT;              // pc+4 单元
+wire [31:0] pc_plus_imm = i_pc + i_imm;                      // 分支目标加法器
+wire [31:0] jalr_target = (i_rs1_data + i_imm) & `PC_ALIGN_MASK; // JALR 单元
+
+// ---- ALU（加减 / 位运算 / 判断 3 子单元，接口统一）----
+alu u_alu (
+    .i_a      (alu_a),
+    .i_b      (alu_b),
+    .i_opcode (i_alu_opcode),
+    .o_result (alu_result)
 );
+
+// ---- Branch Unit ----
+assign o_branch_taken  = (i_branch_sel != `BRANCH_NONE) &&
+                         ((i_branch_sel == `BRANCH_COND) ? alu_result[0] : 1'b1);
+assign o_branch_target = (i_branch_sel == `BRANCH_JALR) ? jalr_target : pc_plus_imm;
+
+// ---- 数据通路输出 ----
+assign o_alu_result = alu_result;
+assign o_pc_plus4   = pc_plus4;
+assign o_rs2_data   = i_rs2_data;
+assign o_rd_addr    = i_rd_addr;
+
+// ---- 控制透传 ----
+assign o_mem_read   = i_mem_read;
+assign o_mem_write  = i_mem_write;
+assign o_mem_width  = i_mem_width;
+assign o_mem_sext   = i_mem_sext;
+assign o_wb_src     = i_wb_src;
+assign o_reg_write  = i_reg_write;
 ```
 
-LUI 指令（需要 \((0, imm)\) ）由 `op_pair_rs1_imm` 自然支持：decode 将 `rs1_addr` 设为 x0，regfile 读出 0，即 `o_a = 0`。
+---
 
-三个模块的输出全部连入 `alu.v`，由 `alu.v` 根据 `opcode` 为各子模块 (`alu_arith`/`alu_bit`/`alu_cmp`) 选择正确的操作数对。
+## 1.3 操作数选择（alu_a / alu_b）
 
-#### 1.4 ALU（4 模块拆分）
+由 decode 生成的选择信号驱动，**取代 v1 的三个 op_pair 模块**：
 
-ALU 按运算类别拆分为 4 个独立 `.v` 文件，由一个顶层模块 `alu.v` 实例化并选择输出：
+| `alu_src_a` | `alu_a` | 典型指令 |
+|:---:|---|---|
+| `ALU_A_RS1` (00) | `i_rs1_data` | R-type、ADDI、LOAD/STORE 地址、JALR |
+| `ALU_A_PC` (01) | `i_pc` | AUIPC、JAL |
+| `ALU_A_ZERO` (10) | 0 | LUI |
+
+| `alu_src` | `alu_b` | 典型指令 |
+|:---:|---|---|
+| 0 | `i_rs2_data` | R-type、BRANCH（比较） |
+| 1 | `i_imm` | I/S/U/J-type、LOAD/STORE |
+
+**LUI 的 A=0 由 `ALU_A_ZERO` 编码直接保证**（v1 曾假设"decode 将 rs1_addr 置 x0"，与实际 decode.v 字段提取行为不符，v2 改为选择信号显式取 0，不再依赖 regfile 读出值）。
+
+---
+
+## 1.4 ALU（4 模块）
 
 ```
                     alu.v (顶层)
                    /     |      \
                   /      |       \
         alu_arith.v  alu_bit.v  alu_cmp.v
-         (加减)     (移位/逻辑)   (比较)
+         (加减)     (位运算)    (判断)
 ```
 
-**模块清单**：
+四个模块均为**纯组合逻辑**，接口统一为 `(i_a, i_b, i_opcode, o_result)`。
 
-| 文件 | 职责 | 覆盖操作码 |
-|------|------|------------|
-| `alu_arith.v` | 整型算术运算 | `ALU_ADD` (0), `ALU_SUB` (1) |
-| `alu_bit.v` | 位运算 + 移位 | `ALU_SLL` (2), `ALU_SRL` (6), `ALU_SRA` (7), `ALU_XOR` (5), `ALU_OR` (8), `ALU_AND` (9) |
-| `alu_cmp.v` | 比较运算（布尔输出） | `ALU_SLT` (3), `ALU_SLTU` (4), `ALU_EQ` (10), `ALU_NE` (11), `ALU_GE` (12), `ALU_GEU` (13) |
-| `alu.v` | 顶层选择器 | 根据 `opcode` 选择子模块输出；`ALU_NOP` (15) / 保留 (14) 输出 `32'h0` |
+### 1.4.1 加减单元（alu_arith.v）
 
-四个模块均为**纯组合逻辑**，无寄存器。
-
----
-
-##### 1.4.1 alu_arith.v — 整型算术单元
-
-**接口**：
-```verilog
-module alu_arith (
-    input  wire [31:0] i_a,
-    input  wire [31:0] i_pc,
-    input  wire [31:0] i_imm,
-    input  wire [31:0] i_b,
-    input  wire [ 3:0] i_opcode,
-    output wire [31:0] o_result
-);
-```
-
-**运算**：
 | 条件 | `o_result` |
 |------|------------|
 | `i_opcode == ALU_ADD` | `i_a + i_b` |
 | `i_opcode == ALU_SUB` | `i_a - i_b` |
-| 其他 | `32'h0`（无效操作码，安全输出） |
+| 其他 | `32'h0` |
 
-**额外输出**：`o_branch_target = i_pc + i_imm`（始终计算，不受 i_opcode 影响）。供 Branch Unit 获取跳转目标地址。
+覆盖：R-type ADD/SUB、ADDI、LOAD/STORE 地址（rs1+imm）、LUI（0+imm）、AUIPC（pc+imm）。
+> v1 中该单元的 `o_branch_target = pc + imm` 端口**移除**，改由 executor 内独立的分支目标加法器承担（见 §1.2），接口恢复统一。
 
----
+### 1.4.2 位运算单元（alu_bit.v）
 
-##### 1.4.2 alu_bit.v — 位运算 + 移位单元
-
-**接口**：同上 `(i_a, i_b, i_opcode, o_result)`
-
-**运算**：
 | 条件 | `o_result` |
 |------|------------|
 | `i_opcode == ALU_SLL` | `i_a << i_b[4:0]` |
@@ -249,15 +242,9 @@ module alu_arith (
 | `i_opcode == ALU_AND` | `i_a & i_b` |
 | 其他 | `32'h0` |
 
-移位量统一截取 `i_b[4:0]`（RV32I 规范）。
+移位量统一截取 `i_b[4:0]`（RV32I 规范；I 型 shamt 经 decode 零扩展进 imm）。
 
----
-
-##### 1.4.3 alu_cmp.v — 比较单元
-
-**接口**：同上 `(i_a, i_b, i_opcode, o_result)`
-
-**运算**：所有比较输出布尔值（0 或 1），供 Branch Unit 直接用作 `branch_taken`。
+### 1.4.3 判断单元（alu_cmp.v）
 
 | 条件 | `o_result` |
 |------|------------|
@@ -269,13 +256,10 @@ module alu_arith (
 | `i_opcode == ALU_GEU` | `i_a >= i_b ? 32'd1 : 32'd0` |
 | 其他 | `32'h0` |
 
----
+输出恒为 0/1 布尔值：供 SLT/SLTI 等写回 rd，也供 BRANCH 指令作 `branch_taken`。
 
-##### 1.4.4 alu.v — 顶层 ALU 选择器
+### 1.4.4 alu.v — 顶层选择器
 
-**职责**：实例化上述三个子模块，根据 `i_opcode` 选择正确的结果输出。所有子模块并联运行，由组合 MUX 选出最终结果。
-
-**接口**：
 ```verilog
 module alu (
     input  wire [31:0] i_a,
@@ -285,7 +269,8 @@ module alu (
 );
 ```
 
-**内部连接**：
+内部连接：
+
 ```
   arith_result ← alu_arith(i_a, i_b, i_opcode)
   bit_result   ← alu_bit  (i_a, i_b, i_opcode)
@@ -296,148 +281,121 @@ module alu (
                                                       32'h0;
 ```
 
-**选择逻辑**：纯组合 `assign` 或 `always_comb`，由 `i_opcode` 的高位或范围译码驱动 MUX。
-
-**默认输出**：`ALU_NOP` (15) 或保留码 (14) → `32'h0`。
-
-**设计优势**：
-- 各计算单元独立，修改一种运算不影响其他。
-- 便于未来扩展（如 M 扩展乘法器只需新增模块并调整 alu.v 的 MUX）。
-- 子模块接口统一（`i_a, i_b, i_opcode → o_result`），替换/复用方便。
-
-
-**输入**：
-- `i_branch` — 标识是否为分支/跳转指令
-- `i_alu_opcode` — ALU 操作码（区分比较类型）
-- `o_alu_result[0]` — ALU 比较结果（对于 EQ/NE/SLT/GE 等，输出为 0 或 1 的布尔值）
-- `alu_a`, `alu_b` — 供 JAL/JALR 直接判定 taken
-
-**输出**：
-- `o_branch_taken` — 是否跳转
-- `o_branch_target` — 跳转目标地址（`i_pc + i_imm`，由 `alu_arith.v` 的 `o_branch_target` 端口提供）
-
-**判定规则**：
-
-| 指令类型 | `i_branch` | 判定方式 |
-|----------|:---:|------|
-| 非分支/跳转 | 0 | `o_branch_taken = 0` |
-| BRANCH (BEQ/BNE/…) | 1 | `o_branch_taken = o_alu_result[0]`（ALU 比较结果） |
-| JAL | 1 | `o_branch_taken = 1`（无条件跳转） |
-| JALR | 1 | `o_branch_taken = 1`（无条件跳转） |
-| NOP (flush bubble) | 0 | `o_branch_taken = 0` |
-
-**区分 JAL/JALR 与 BRANCH**：当前 `i_branch` 仅标记"是否为分支/跳转"，无法区分条件分支和无条件跳转。但可以结合 `i_alu_opcode` 判断：
-- 若 `i_alu_opcode` 为 `ALU_EQ/NE/SLT/SLTU/GE/GEU` → 条件分支，`o_branch_taken` 由 ALU 结果决定
-- 若 `i_alu_opcode` 为 `ALU_ADD` 且 `i_branch=1` → JAL/JALR（ALU 计算跳转目标，无条件跳转）
-
-**简化实现**：Branch Unit 同时检查 `i_branch` 和 `i_alu_opcode`：
-
-```verilog
-// 分支目标（始终计算）
-assign o_branch_target = alu_arith_branch_target;  // 来自 alu_arith.o_branch_target
-
-// 分支判定
-always_comb begin
-    if (!i_branch)
-        o_branch_taken = 1'b0;
-    else if (i_alu_opcode == `ALU_ADD)   // JAL / JALR: unconditional
-        o_branch_taken = 1'b1;
-    else                                 // BRANCH: ALU comparison result
-        o_branch_taken = o_alu_result[0];
-end
-```
-
-> 注：JALR 的跳转目标实际为 `rs1 + imm`，但 ALU 已计算此值（`alu_a = rs1, alu_b = imm`）。flow_control.v 需要从 `o_alu_result` 而非 `o_branch_target` 获取 JALR 的目标地址。当前分支目标 `pc + imm` 对 JAL 正确，JALR 由 flow_control 根据 opcode 判断取 `o_alu_result` 而非 `o_branch_target`。
+`ALU_NOP` (15) 与保留码 (14) → `32'h0`（安全输出）。
+**设计优势**：各单元独立，改一种运算不影响其他；M 扩展只需新增子模块并调整 MUX。
 
 ---
 
-#### 1.6 控制信号透传
+## 1.5 Branch Unit
 
-以下信号不做任何处理，直接从输入连接到同名输出，传递至 `ex_mem.v`：
+### 输入
 
-| 信号 | 说明 |
-|------|------|
-| `o_rs2_data` | Store 数据原样透传 |
-| `o_rd_addr` | 目标寄存器地址原样透传 |
-| `o_mem_read`, `o_mem_write` | 访存使能 |
-| `o_mem_width`, `o_mem_sext` | 访存参数 |
-| `o_mem_to_reg`, `o_reg_write` | 写回控制 |
+- `i_branch_sel[1:0]` — 分支类型（decode 生成，**不再依赖 alu_opcode 推断**）
+- `alu_result[0]` — 判断单元布尔结果（仅条件分支使用）
+- `pc_plus_imm` / `jalr_target` — 跳转目标（EX 内并行计算）
 
-这是纯 wire 连接，不经过任何逻辑：
+### 判定规则
+
+| `i_branch_sel` | 指令 | `o_branch_taken` | `o_branch_target` |
+|:---:|---|---|---|
+| `BRANCH_NONE` (00) | 非分支/跳转 | 0 | `pc+imm`（无效） |
+| `BRANCH_COND` (01) | BEQ/BNE/BLT/BGE/BLTU/BGEU | `alu_result[0]`（比较结果） | `pc+imm` |
+| `BRANCH_JAL` (10) | JAL | 1（无条件） | `pc+imm` |
+| `BRANCH_JALR` (11) | JALR | 1（无条件） | `(rs1+imm) & ~1` |
 
 ```verilog
-assign o_rs2_data   = i_rs2_data;
-assign o_rd_addr    = i_rd_addr;
-assign o_mem_read   = i_mem_read;
-assign o_mem_write  = i_mem_write;
-assign o_mem_width  = i_mem_width;
-assign o_mem_sext   = i_mem_sext;
-assign o_mem_to_reg = i_mem_to_reg;
-assign o_reg_write  = i_reg_write;
+assign o_branch_taken  = (i_branch_sel != `BRANCH_NONE) &&
+                         ((i_branch_sel == `BRANCH_COND) ? alu_result[0] : 1'b1);
+assign o_branch_target = (i_branch_sel == `BRANCH_JALR) ? jalr_target : pc_plus_imm;
 ```
+
+**JALR 目标在 EX 内自闭环**：v1 曾要求 flow_ctrl 区分 JAL/JALR 并额外取 `o_alu_result` 作 JALR 目标（且该信号须经 ex_mem 才能拿到，时序不成立）。v2 由 JALR 单元独立计算并完成目标 MUX，`flow_ctrl` 只需消费 `o_branch_taken` / `o_branch_target` 两个信号，无需任何二次判断。
+
+---
+
+## 1.6 控制透传
+
+纯 wire 连接，不经任何逻辑（见 §1.2 代码）。透传信号：`o_rs2_data`、`o_rd_addr`、`o_mem_read/write/width/sext`、`o_wb_src`、`o_reg_write`。
+
+---
 
 ## 设计原则
 
 1. **纯数据通路**：`executor.v` 无状态、无控制信号生成。所有控制来自 `id_ex.v`，本级仅消费。
-2. **单一 ALU**：所有算术、逻辑、移位、比较共用一个 ALU，由 `alu_opcode` 扁平编码驱动。
-3. **分支并行**：分支目标加法器与 ALU 并行工作，不增加关键路径延迟。
-4. **控制透传**：MEM/WB 控制信号原样穿过 EX Stage，不做任何修改。
-5. **零逻辑 stalling/flushing**：EX Stage 本身不产生 stall/flush——这些由 `hazard_control.v` 和 `flow_control.v` 通过控制 `id_ex.v` / `ex_mem.v` 的流水线寄存器来实现。
+2. **无条件并行计算**：一个指令所需的全部运算单元（pc+4、加减、位运算、判断、JALR 目标、分支目标）**一律无条件恒算**，不论当前指令是否使用该结果。单元之间无先后依赖、无串行复用、无状态机。
+3. **消费端门控**：计算结果"是否生效"全部由消费端决定，EX 内不做条件计算——
+   - ALU 结果是否写回寄存器堆：由 `reg_write` + `wb_src` 门控（WB 阶段消费）
+   - 跳转目标是否取代 `pc+4`：由 `branch_taken` 在 PC 更新处门控（flow_ctrl 消费）
+   - 例：BEQ 的判断（`rs1==rs2`）与目标加法（`pc+imm`）同时并行计算；比较结果为 0 时目标加法结果虽已算出但被 `branch_taken=0` 丢弃——计算无害，门控在 PC 寄存器处生效
+4. **操作数选择信号化**：`alu_a`/`alu_b` 由 decode 生成的选择信号直接选出，不再依赖固定配对模块（op_pair 废弃）。
+5. **分支并行**：分支目标加法器、JALR 单元与 ALU 并行工作，不增加关键路径级数。
+6. **分支判定零解码**：`i_branch_sel` 直接编码分支类型，EX 不进行任何二次解码。
+7. **控制透传**：MEM/WB 控制信号原样穿过 EX Stage。
+8. **零逻辑 stalling/flushing**：EX Stage 本身不产生 stall/flush，由 `hazard_ctrl.v` / `flow_ctrl.v` 控制流水线寄存器实现。
 
 ## 关键路径分析
 
-**最长组合路径**：
+**分支路径（决定时钟周期）**：
 
 ```
-id_ex.o_rs1_data → Operand MUX → ALU (加法/移位) → o_alu_result → ex_mem.i_alu_result
+id_ex → alu_a/alu_b MUX → alu_cmp → branch_taken → flow_ctrl → pc_next → pc 建立时间
+id_ex → JALR 单元 (rs1+imm → &mask) → branch_target → flow_ctrl → pc_next
 ```
 
-- Operand MUX：1 级选择器（~0.2 ns）
-- ALU 加法：32-bit 进位链（~5 ns in XC7A35T -2 speed grade）
-- 总计：< 6 ns，对应 > 166 MHz
+两条分支路径与 ALU 数据路径并行，各含加法器 + 若干级选择逻辑，需在单周期内满足 PC 寄存器建立时间——**分支重定向路径是全局关键路径**（v1 曾误将 ALU→ex_mem 判为最长路径，实际它只需满足 ex_mem 建立时间，压力更小）。
 
-**分支路径**（时序更短）：
+**数据路径**：
 
 ```
-alu_arith: pc + imm → o_branch_target → Branch Unit
-id_ex.o_rs1/o_rs2  → ALU 比较 → branch_taken → flow_control
+id_ex → alu_a/alu_b MUX → ALU (加法/移位) → o_alu_result → ex_mem.i_alu_result
 ```
 
-两条路径并行，总延迟约等于 ALU 比较延迟（~3 ns）。
+**分支惩罚**：EX 级判定分支意味着 taken 时需 flush IF/ID 两级（2 周期惩罚），由 flow_ctrl/hazard_ctrl 处理，EX 不感知。
 
 ## 与其他模块的交互
 
 ### 与 ID Stage 的接口
 
-| 来源 | 信号 | 目标 | 说明 |
-|------|------|------|------|
-| id_ex.v | 全部输出 | executor.v (全部输入) | 数据通路值 + 控制总线 |
-
-详见 `id_ex.v` 的端口定义。
+id_ex.v 全部输出 → executor.v 全部输入（数据通路值 + 控制总线）。v2 新增/变更的输入：`i_alu_src_a[1:0]`（扩宽）、`i_branch_sel[1:0]`（替代 `i_branch`）、`i_wb_src[1:0]`（替代 `i_mem_to_reg`）。
 
 ### 与 MEM Stage 的接口
 
-| 来源 | 信号 | 目标 | 说明 |
-|------|------|------|------|
-| executor.v | `o_alu_result`, `o_rs2_data`, `o_rd_addr` | ex_mem.v | 计算结果、Store 数据、目标寄存器 |
-| executor.v | `o_mem_*`, `o_reg_write` 等 | ex_mem.v | 控制信号透传 |
+| 来源 | 信号 | 目标 |
+|------|------|------|
+| executor.v | `o_alu_result`, `o_pc_plus4`, `o_rs2_data`, `o_rd_addr` | ex_mem.v |
+| executor.v | `o_mem_*`, `o_wb_src`, `o_reg_write` | ex_mem.v |
 
-`ex_mem.v` 是 EX/MEM 流水线寄存器，负责锁存以上信号并传递给 MEM Stage。
+`ex_mem.v` 需新增 `o_pc_plus4` 与 `o_wb_src` 的锁存/透传。
 
 ### 与 Pipeline Control 的接口
 
-| 来源 | 信号 | 目标 | 说明 |
-|------|------|------|------|
-| executor.v | `o_branch_taken` | flow_control.v | 分支是否 taken |
-| executor.v | `o_branch_target` | flow_control.v | 跳转目标地址（来自 `alu_arith.o_branch_target`） |
+| 来源 | 信号 | 目标 |
+|------|------|------|
+| executor.v | `o_branch_taken` | flow_ctrl.v |
+| executor.v | `o_branch_target` | flow_ctrl.v |
 
-对于 JALR，flow_control 需额外获取 `o_alu_result` 作为跳转目标（JALR 目标 = rs1 + imm，由 ALU 计算）。该信号通过 `ex_mem.v` 或直接从 executor 输出获取。
+flow_ctrl 直接消费，**无需区分 JAL/JALR**（v2 已在 EX 内闭环）。
+
+## 对现有信号设计的调整清单（供后续修订 decode / id_ex / 头文件）
+
+按"先 EX 后其他"的顺序，EX 设计落地后需同步调整：
+
+1. **decode.v**：
+   - `o_alu_src_a` 由 1 bit 扩为 2 bit；LUI 置 `ALU_A_ZERO`（修复 v1 的 LUI rs1=x0 假设问题）
+   - `o_branch`（1 bit）→ `o_branch_sel[1:0]`：BRANCH→`BRANCH_COND`、JAL→`BRANCH_JAL`、JALR→`BRANCH_JALR`、其余→`BRANCH_NONE`
+   - `o_mem_to_reg`（1 bit）→ `o_wb_src[1:0]`：普通 ALU→`WB_SRC_ALU`、LOAD→`WB_SRC_MEM`、JAL/JALR→`WB_SRC_PC_PLUS4`
+   - JAL/JALR 的 `alu_opcode` 建议置 `ALU_NOP`（结果不使用，写回 pc+4，目标由专门单元计算）
+2. **id_ex.v**：控制总线位宽调整（`alu_src_a` +1、`branch_sel` +1、`wb_src` +1、`mem_to_reg` −1，净增约 2 bit），并透传 `i_pc`（已有）
+3. **头文件**：
+   - `alu_op_define.vh` 新增：`ALU_A_RS1/ALU_A_PC/ALU_A_ZERO`
+   - `opcode_define.vh` 新增：`BRANCH_NONE/BRANCH_COND/BRANCH_JAL/BRANCH_JALR`
+   - `const_define.vh` 新增：`WB_SRC_ALU/WB_SRC_MEM/WB_SRC_PC_PLUS4`、`PC_ALIGN_MASK 32'hFFFFFFFE`
+4. **ex_mem.v / mem_wb.v / wb.v**（未来）：透传 `o_pc_plus4`、`o_wb_src`；wb 阶段按 `wb_src` 三选一写回
+5. **if_id.v**：**无需改动**（pc+4 在 EX 级自算）。可选优化：IF 级透传 `pc_plus4` 可省一个加法器（约 32 LUT），若采用则 `i_pc` 输入可移除
 
 ## 未来扩展
 
-- **M 扩展（乘除）**：在 ALU 中增加 `ALU_MUL`, `ALU_MULH`, `ALU_DIV`, `ALU_REM` 等操作码。
-  - 乘除法为多周期操作，需在 executor 中增加状态机或在 EX Stage 插入 stall。
-  - 若引入多周期，`ex_mem.v` 需增加 `stall` 控制以保持 EX 输出有效。
-- **Forwarding 旁路**：hazard_control 检测 RAW 冲突后，在 executor 的操作数 MUX 前增加 forwarding MUX，从 `ex_mem.o_alu_result` 或 `mem_wb.o_*` 旁路数据。
-- **JALR 目标地址**：当前分支目标统一为 `pc + imm`，对 JALR 不适用（JALR 目标 = rs1 + imm）。flow_control 需区分 JAL 和 JALR，对后者取 ALU 结果作为跳转目标。
-- **异常处理**：若后续支持 CSR 和异常，executor 需增加 `i_exception` 输入（来自 decode）和异常信息透传。
+- **M 扩展（乘除）**：新增 `alu_mul.v` / `alu_div.v` 子模块 + `alu.v` MUX 扩展；乘除为多周期，届时在 EX 插入 stall 或状态机。
+- **Forwarding 旁路**：hazard_ctrl 检测 RAW 后，在操作数选择 MUX 前增加旁路 MUX（从 `ex_mem.o_alu_result` / `mem_wb.o_*` 取数）。
+- **异常处理**：若支持 CSR/异常，executor 需增加异常相关输入与透传。
+- **写回源扩展**：`wb_src[1:0]` 预留编码 2'b11，供未来 CSR 读值等新写回源使用。

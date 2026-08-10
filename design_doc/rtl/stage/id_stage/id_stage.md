@@ -41,7 +41,7 @@ ID（Instruction Decode）Stage 是 5 级流水线的第二级，负责将 IF St
 **职责**：纯组合逻辑。接收 32 位指令字和当前 PC，一次性输出三样东西：
 1. 寄存器地址（`rs1_addr`, `rs2_addr`, `rd_addr`）
 2. 32 位立即数（`imm`）
-3. 完整的控制信号束（`alu_opcode`, `branch`, `reg_write` 等）
+3. 完整的控制信号束（`alu_opcode`, `branch_sel`, `wb_src`, `reg_write` 等）
 
 内部按子功能划分为三个 `always_comb` 块，但对外是统一模块。
 
@@ -82,14 +82,14 @@ ID（Instruction Decode）Stage 是 5 级流水线的第二级，负责将 IF St
 | 信号 | 宽度 | 去向 | 说明 |
 |------|------|------|------|
 | `o_alu_opcode` | 4 | id_ex.v → executor.v | ALU 运算类型（扁平编码，含分支比较） |
-| `o_alu_src_a` | 1 | id_ex.v → executor.v | ALU A 口选择：0=rs1_data, 1=pc（AUIPC / JAL / JALR） |
-| `o_alu_src` | 1 | id_ex.v → executor.v | ALU B 口选择：0=rs2_data, 1=imm（I / U / J / S / B 型） |
-| `o_branch` | 1 | id_ex.v → flow_control.v | 是否为分支指令（opcode == BRANCH 时置 1） |
+| `o_alu_src_a` | 2 | id_ex.v → executor.v | ALU A 口选择：00=rs1, 01=pc（AUIPC）, 10=0（LUI） |
+| `o_alu_src` | 1 | id_ex.v → executor.v | ALU B 口选择：0=rs2_data, 1=imm（I / U / S 型） |
+| `o_branch_sel` | 2 | id_ex.v → flow_ctrl.v | 分支类型：00=无, 01=条件分支, 10=JAL, 11=JALR |
 | `o_mem_read` | 1 | id_ex.v → MEM Stage | 读数据存储器使能 |
 | `o_mem_write` | 1 | id_ex.v → MEM Stage | 写数据存储器使能 |
 | `o_mem_width` | 2 | id_ex.v → MEM Stage | 访存宽度：00=Byte, 01=Half, 10=Word |
 | `o_mem_sext` | 1 | id_ex.v → MEM Stage | Load 符号扩展：0=零扩展, 1=符号扩展 |
-| `o_mem_to_reg` | 1 | id_ex.v → WB Stage | 写回源选择：0=ALU, 1=内存（JAL/JALR 的 PC+4 写回路径 TBD） |
+| `o_wb_src` | 2 | id_ex.v → WB Stage | 写回源选择：00=ALU, 01=内存, 10=pc+4（JAL/JALR） |
 | `o_reg_write` | 1 | id_ex.v → WB Stage | 寄存器写使能 |
 
 > `o_rd_addr` 同时进入 `id_ex.v` 锁存，经 `ex_mem.v` → `mem_wb.v` 透传至 WB Stage，用于 regfile 写回。
@@ -109,14 +109,14 @@ module decode (
 
     // 控制信号束
     output wire [ 3:0] o_alu_opcode,
-    output wire        o_alu_src_a,
+    output wire [ 1:0] o_alu_src_a,
     output wire        o_alu_src,
-    output wire        o_branch,
+    output wire [ 1:0] o_branch_sel,
     output wire        o_mem_read,
     output wire        o_mem_write,
     output wire [ 1:0] o_mem_width,
     output wire        o_mem_sext,
-    output wire        o_mem_to_reg,
+    output wire [ 1:0] o_wb_src,
     output wire        o_reg_write
 );
 
@@ -193,7 +193,7 @@ endmodule
 
 | 码值 | 名称 | 运算 | 触发条件 |
 |------|------|------|----------|
-| 0 | ALU_ADD | A + B | ADDI, ADD, LUI（imm=0）, AUIPC, JAL, JALR, LOAD, STORE |
+| 0 | ALU_ADD | A + B | ADDI, ADD, LUI, AUIPC, LOAD, STORE |
 | 1 | ALU_SUB | A - B | SUB |
 | 2 | ALU_SLL | A << B[4:0] | SLLI, SLL |
 | 3 | ALU_SLT | signed(A) < signed(B) | SLTI, SLT, BLT |
@@ -210,7 +210,7 @@ endmodule
 | 14 | — | （保留） | — |
 | 15 | ALU_NOP | result = 0 | 未实现/非法指令 / NOP bubble |
 
-**分支处理**：`o_branch` 仅标记是否为分支指令（用于 flow_control），比较类型由 `o_alu_opcode` 携带。executor 内部的 Branch Unit 根据 `alu_opcode` 判断条件并输出 `branch_taken`。
+**分支处理**：`o_branch_sel` 直接编码分支类型（无/条件分支/JAL/JALR），比较类型由 `o_alu_opcode` 携带（仅条件分支时）。executor 内部的 Branch Unit 直接消费 `branch_sel` 输出 `branch_taken`，不再进行二次解码。
 
 **mem_width + mem_sext（LOAD 时）**：
 
@@ -231,14 +231,14 @@ endmodule
 always_comb begin
     // 安全默认值（NOP / 非法指令）
     o_alu_opcode  = ALU_NOP;    // 4'hF
-    o_alu_src_a   = 1'b0;
+    o_alu_src_a   = ALU_A_RS1;  // 00
     o_alu_src     = 1'b0;
-    o_branch      = 1'b0;
+    o_branch_sel  = BRANCH_NONE; // 00
     o_mem_read    = 1'b0;
     o_mem_write   = 1'b0;
     o_mem_width   = 2'b00;
     o_mem_sext    = 1'b0;
-    o_mem_to_reg  = 1'b0;
+    o_wb_src      = WB_SRC_ALU; // 00
     o_reg_write   = 1'b0;
 
     case (opcode)
@@ -273,8 +273,8 @@ always_comb begin
         end
 
         `OPCODE_BRANCH: begin
-            o_branch    = 1'b1;
-            o_alu_src   = 1'b0;
+            o_branch_sel = BRANCH_COND;
+            o_alu_src    = 1'b0;
             case (funct3)
                 3'b000: o_alu_opcode = ALU_EQ;
                 3'b001: o_alu_opcode = ALU_NE;
@@ -290,7 +290,7 @@ always_comb begin
             o_mem_read   = 1'b1;
             o_alu_src    = 1'b1;
             o_alu_opcode = ALU_ADD;
-            o_mem_to_reg = 1'b1;  // 写回来自内存
+            o_wb_src     = WB_SRC_MEM;  // 写回来自内存
             case (funct3)
                 3'b000: {o_mem_sext, o_mem_width} = {1'b1, 2'b00}; // LB
                 3'b001: {o_mem_sext, o_mem_width} = {1'b1, 2'b01}; // LH
@@ -313,31 +313,30 @@ always_comb begin
 
         `OPCODE_LUI: begin
             o_reg_write  = 1'b1;
+            o_alu_src_a  = ALU_A_ZERO; // A = 0（高位立即数）
             o_alu_src    = 1'b1;
             o_alu_opcode = ALU_ADD;
-            // ALU A = 0 (rs1_addr 指向 x0 时数据即为 0，或由 executor 判断)
         end
 
         `OPCODE_AUIPC: begin
             o_reg_write  = 1'b1;
-            o_alu_src_a  = 1'b1;  // PC
+            o_alu_src_a  = ALU_A_PC;  // A = PC
             o_alu_src    = 1'b1;  // imm
             o_alu_opcode = ALU_ADD;
         end
 
         `OPCODE_JAL: begin
             o_reg_write  = 1'b1;
-            o_alu_src_a  = 1'b1;  // PC
-            o_alu_src    = 1'b1;  // imm (跳转目标)
-            o_alu_opcode = ALU_ADD;
-            // PC+4 写回路径 TBD（见"未来扩展"）
+            o_wb_src     = WB_SRC_PC_PLUS4;  // rd ← pc+4（链接地址）
+            o_branch_sel = BRANCH_JAL;       // 无条件跳转
+            o_alu_opcode = ALU_NOP;          // 目标由 EX 的 pc+imm 单元计算
         end
 
         `OPCODE_JALR: begin
             o_reg_write  = 1'b1;
-            o_alu_src    = 1'b1;
-            o_alu_opcode = ALU_ADD;
-            // rs1_data + imm = 跳转目标，PC+4 写回路径 TBD
+            o_wb_src     = WB_SRC_PC_PLUS4;  // rd ← pc+4（链接地址）
+            o_branch_sel = BRANCH_JALR;      // 无条件跳转
+            o_alu_opcode = ALU_NOP;          // 目标由 EX 的 JALR 单元计算
         end
 
         // SYSTEM: ECALL/EBREAK — 保持默认值（均为 0，即 NOP）
@@ -359,22 +358,22 @@ end
 |------|------|------|------|
 | `i_clk` | 1 | 全局时钟 | 系统时钟 |
 | `i_rst_n` | 1 | 全局复位 | 异步复位，低有效 |
-| `i_flush` | 1 | flow_control.v | 流水线冲刷 |
-| `i_stall` | 1 | hazard_control.v | 流水线暂停 |
+| `i_flush` | 1 | flow_ctrl.v | 流水线冲刷 |
+| `i_stall` | 1 | hazard_ctrl.v | 流水线暂停 |
 | `i_pc` | 32 | if_id.v (o_pc) | 当前指令 PC |
 | `i_rs1_data` | 32 | regfile.v (o_rs1_data) | rs1 读出值 |
 | `i_rs2_data` | 32 | regfile.v (o_rs2_data) | rs2 读出值 |
 | `i_imm` | 32 | decode.v (o_imm) | 32 位立即数 |
 | `i_rd_addr` | 5 | decode.v (o_rd_addr) | 目标寄存器地址 |
 | `i_alu_opcode` | 4 | decode.v (o_alu_opcode) | ALU 运算类型 |
-| `i_alu_src_a` | 1 | decode.v (o_alu_src_a) | ALU A 口选择 |
+| `i_alu_src_a` | 2 | decode.v (o_alu_src_a) | ALU A 口选择 |
 | `i_alu_src` | 1 | decode.v (o_alu_src) | ALU B 口选择 |
-| `i_branch` | 1 | decode.v (o_branch) | 是否为分支指令 |
+| `i_branch_sel` | 2 | decode.v (o_branch_sel) | 分支类型编码 |
 | `i_mem_read` | 1 | decode.v (o_mem_read) | 读 Memory |
 | `i_mem_write` | 1 | decode.v (o_mem_write) | 写 Memory |
 | `i_mem_width` | 2 | decode.v (o_mem_width) | 访存宽度 |
 | `i_mem_sext` | 1 | decode.v (o_mem_sext) | 符号扩展 |
-| `i_mem_to_reg` | 1 | decode.v (o_mem_to_reg) | 写回数据选择 |
+| `i_wb_src` | 2 | decode.v (o_wb_src) | 写回源选择 |
 | `i_reg_write` | 1 | decode.v (o_reg_write) | 寄存器写使能 |
 
 **输出**：与输入一一对应，前缀 `o_`。控制信号直接输出至 `executor.v`（EX Stage 不再有中间控制模块）。
@@ -387,14 +386,14 @@ end
 | `o_imm[31:0]` | executor.v |
 | `o_alu_opcode[3:0]` 等 | executor.v（ALU/Branch Unit 直接消费） |
 | `o_rd_addr[4:0]` | ex_mem.v → mem_wb.v → regfile.v |
-| `o_branch` | flow_control.v |
+| `o_branch_sel[1:0]` | flow_ctrl.v |
 
 **行为**（与 `if_id.v` 一致）：
 
 ```
 always_ff @(posedge i_clk or negedge i_rst_n):
   if (!i_rst_n):              全部输出 ← 安全默认值
-  else if (i_flush):          控制总线清零（reg_write=0, mem_read=0, mem_write=0, branch=0），数据 ← `XLEN_ZERO
+  else if (i_flush):          控制总线清零（reg_write=0, mem_read=0, mem_write=0, branch_sel=BRANCH_NONE），数据 ← `XLEN_ZERO
   else if (i_stall):          保持当前值
   else:                       锁存所有输入
 ```
@@ -427,10 +426,10 @@ always_ff @(posedge i_clk or negedge i_rst_n):
 
 | 来源 | 信号 | 目标 | 说明 |
 |------|------|------|------|
-| hazard_control.v | `stall` | id_ex.v | 暂停 ID/EX 更新 |
-| flow_control.v | `flush` | id_ex.v | 冲刷流水线寄存器 |
-| id_ex.v | `o_branch` | flow_control.v | 标记分支指令，参与冲刷判断 |
-| id_ex.v | `o_rd_addr` | hazard_control.v | 用于 RAW 冲突检测（forwarding） |
+| hazard_ctrl.v | `stall` | id_ex.v | 暂停 ID/EX 更新 |
+| flow_ctrl.v | `flush` | id_ex.v | 冲刷流水线寄存器 |
+| id_ex.v | `o_branch` | flow_ctrl.v | 标记分支指令，参与冲刷判断 |
+| id_ex.v | `o_rd_addr` | hazard_ctrl.v | 用于 RAW 冲突检测（forwarding） |
 
 ### 与 EX Stage 的交互
 
@@ -438,12 +437,13 @@ always_ff @(posedge i_clk or negedge i_rst_n):
 
 ```
 executor.v 内部:
-  ALU:  .a(alu_src_a ? pc : rs1_data)
+  ALU:  .a(alu_src_a[1:0]: 00=rs1, 01=pc, 10=0)
         .b(alu_src   ? imm : rs2_data)
         .opcode(alu_opcode)   // 直接来自 id_ex，不再查表
         .result(alu_result)
 
-  Branch Unit: 根据 alu_opcode 判断条件，输出 branch_taken → flow_control.v
+  Branch Unit: 根据 branch_sel[1:0] 直接判定，输出 branch_taken → flow_ctrl.v
+  （无条件跳转 JAL/JALR 的目标由 EX 内 pc+imm / JALR 单元计算，不依赖 ALU）
 ```
 
 ## 未来扩展
@@ -451,6 +451,6 @@ executor.v 内部:
 - **非法指令检测**：在 `decode.v` 中增加 `illegal_instr` 输出信号。
 - **CSR 支持**：`decode.v` 扩展 SYSTEM opcode 译码，增加 `csr_read/csr_write/csr_addr` 等输出。
 - **M 扩展**：`decode.v` 内增加 MUL/DIV 的 `alu_opcode` 编码（4-bit 可容纳）。
-- **JAL/JALR 链接地址**：当前 `mem_to_reg` 为 1-bit（ALU vs 内存），JAL/JALR 的 PC+4 写回路径待后续设计（IF 阶段计算 PC+4 随流水线透传，或在 EX 段专设）。
+- **JAL/JALR 链接地址**：**已完成**（见 ex_stage.md v2）。`wb_src` 增加 `WB_SRC_PC_PLUS4` 编码，pc+4 由 EX 级 executor 内加法器计算并经流水线透传写回。
 - **FENCE / FENCE.I / PAUSE**：当前 NOP 处理，未来在 MEM 阶段实现。
 - **ECALL / EBREAK**：当前 `reg_write=0`，未来触发异常流。

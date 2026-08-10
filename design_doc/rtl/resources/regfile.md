@@ -65,7 +65,7 @@ always_ff @(posedge i_clk):
    // (* ram_style = "distributed" *)
    ```
    distributed RAM 适合 32×32 的小型寄存器文件，读写延迟低。
-5. **无转发逻辑**：regfile 自身不处理 RAW 冒险，转发由 `hazard_control.v` 中的 forwarding 逻辑在 ID Stage 侧完成。
+5. **无转发逻辑**：regfile 自身不处理 RAW 冒险，转发由 `hazard_ctrl.v` 中的 forwarding 逻辑在 ID Stage 侧完成。
 
 ### 接口时序
 

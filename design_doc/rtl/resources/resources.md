@@ -24,7 +24,7 @@ Resources 是 CPU 全局共享的硬件资源，不属于任何流水线级，�
 | `i_clk` | input | 1 | 全局时钟 | 系统时钟 |
 | `i_rst_n` | input | 1 | 全局复位 | 异步复位，低有效 |
 | `i_pc_next` | input | `` `XLEN `` | `pc_next.v` | 下一条指令地址 |
-| `i_stall` | input | 1 | `hazard_control.v` | PC 暂停更新，高有效 |
+| `i_stall` | input | 1 | `hazard_ctrl.v` | PC 暂停更新，高有效 |
 
 **输出**
 
@@ -149,7 +149,7 @@ always_ff @(posedge i_clk):
    // (* ram_style = "distributed" *)
    ```
    distributed RAM 适合 32×32 的小型寄存器文件，读写延迟低。
-5. **无转发逻辑**：regfile 自身不处理 RAW 冒险，转发由 `hazard_control.v` 中的 forwarding 逻辑在 ID Stage 侧完成。
+5. **无转发逻辑**：regfile 自身不处理 RAW 冒险，转发由 `hazard_ctrl.v` 中的 forwarding 逻辑在 ID Stage 侧完成。
 
 ### 接口时序
 

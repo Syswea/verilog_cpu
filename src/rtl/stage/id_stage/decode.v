@@ -4,7 +4,7 @@
 // Performs all ID-stage work in a single module:
 //   1. Field extraction (opcode, funct3, funct7, register addresses)
 //   2. Immediate generation (I/S/B/U/J/shift-amount formats)
-//   3. Control signal generation (alu_opcode, branch, mem, wb, etc.)
+//   3. Control signal generation (alu_opcode, alu_src_a, branch_sel, wb_src, etc.)
 //
 // This is the single source of truth for all pipeline control signals.
 // All outputs are combinational (no registers inside decode.v).
@@ -29,14 +29,14 @@ module decode (
 
     // ---- Control Signal Bundle ----
     output wire [ 3:0] o_alu_opcode,    // to id_ex.v → executor.v (ALU op)
-    output wire        o_alu_src_a,     // to id_ex.v → executor.v (A-port sel)
+    output wire [ 1:0] o_alu_src_a,     // to id_ex.v → executor.v (A-port sel: rs1/pc/zero)
     output wire        o_alu_src,       // to id_ex.v → executor.v (B-port sel)
-    output wire        o_branch,        // to id_ex.v → flow_control.v
+    output wire [ 1:0] o_branch_sel,    // to id_ex.v → flow_ctrl.v (branch type)
     output wire        o_mem_read,      // to id_ex.v → MEM Stage
     output wire        o_mem_write,     // to id_ex.v → MEM Stage
     output wire [ 1:0] o_mem_width,     // to id_ex.v → MEM Stage
     output wire        o_mem_sext,      // to id_ex.v → MEM Stage
-    output wire        o_mem_to_reg,    // to id_ex.v → WB Stage
+    output wire [ 1:0] o_wb_src,        // to id_ex.v → WB Stage (writeback source)
     output wire        o_reg_write      // to id_ex.v → WB Stage
 );
 
@@ -130,27 +130,27 @@ module decode (
     // control for EX / MEM / WB stages.  No secondary decoding downstream.
 
     reg [ 3:0] alu_opcode;
-    reg        alu_src_a;
+    reg [ 1:0] alu_src_a;
     reg        alu_src;
-    reg        branch;
+    reg [ 1:0] branch_sel;
     reg        mem_read;
     reg        mem_write;
     reg [ 1:0] mem_width;
     reg        mem_sext;
-    reg        mem_to_reg;
+    reg [ 1:0] wb_src;
     reg        reg_write;
 
     always_comb begin
         // ---- Safe defaults (NOP / illegal instruction) ----
         alu_opcode  = `ALU_NOP;
-        alu_src_a   = 1'b0;
+        alu_src_a   = `ALU_A_RS1;
         alu_src     = 1'b0;
-        branch      = 1'b0;
+        branch_sel  = `BRANCH_NONE;
         mem_read    = 1'b0;
         mem_write   = 1'b0;
         mem_width   = `MEM_WIDTH_BYTE;
         mem_sext    = 1'b0;
-        mem_to_reg  = 1'b0;
+        wb_src      = `WB_SRC_ALU;
         reg_write   = 1'b0;
 
         case (opcode)
@@ -219,7 +219,7 @@ module decode (
                 reg_write   = 1'b1;
                 alu_src     = 1'b1;   // imm (address offset)
                 alu_opcode  = `ALU_ADD;
-                mem_to_reg  = 1'b1;   // data from memory
+                wb_src      = `WB_SRC_MEM;  // write back memory data
                 mem_read    = 1'b1;
                 case (funct3)
                     `FUNCT3_LB:  begin mem_sext = 1'b1; mem_width = `MEM_WIDTH_BYTE; end
@@ -250,8 +250,8 @@ module decode (
             // B-type (BRANCH)
             //-----------------------------------------------------------------
             `OPCODE_BRANCH: begin
-                branch    = 1'b1;
-                alu_src   = 1'b0;   // rs2
+                branch_sel = `BRANCH_COND;
+                alu_src    = 1'b0;   // rs2
                 case (funct3)
                     `FUNCT3_BEQ:  alu_opcode = `ALU_EQ;
                     `FUNCT3_BNE:  alu_opcode = `ALU_NE;
@@ -268,9 +268,10 @@ module decode (
             //-----------------------------------------------------------------
             `OPCODE_LUI: begin
                 reg_write  = 1'b1;
-                alu_src    = 1'b1;   // imm (upper immediate)
+                alu_src_a  = `ALU_A_ZERO;  // ALU A = 0 (upper immediate)
+                alu_src    = 1'b1;   // imm
                 alu_opcode = `ALU_ADD;
-                // ALU: A=0 (rs1=x0 reads zero), B=imm → result = imm
+                // ALU: A=0, B=imm → result = imm (imm << 12 already in decode)
             end
 
             //-----------------------------------------------------------------
@@ -278,7 +279,7 @@ module decode (
             //-----------------------------------------------------------------
             `OPCODE_AUIPC: begin
                 reg_write  = 1'b1;
-                alu_src_a  = 1'b1;   // PC
+                alu_src_a  = `ALU_A_PC;  // A = PC
                 alu_src    = 1'b1;   // imm
                 alu_opcode = `ALU_ADD;
             end
@@ -287,23 +288,20 @@ module decode (
             // J-type (JAL)
             //-----------------------------------------------------------------
             `OPCODE_JAL: begin
-                reg_write  = 1'b1;
-                alu_src_a  = 1'b1;   // PC  (for jump target calc)
-                alu_src    = 1'b1;   // imm
-                alu_opcode = `ALU_ADD;
-                // NOTE: PC+4 link-address writeback path is TBD.
-                //       For now, alu_opcode drives the jump target.
+                reg_write   = 1'b1;
+                wb_src      = `WB_SRC_PC_PLUS4;  // rd ← pc+4 (link address)
+                branch_sel  = `BRANCH_JAL;       // unconditional jump
+                alu_opcode  = `ALU_NOP;          // target by pc+imm unit in EX
             end
 
             //-----------------------------------------------------------------
             // I-type (JALR)
             //-----------------------------------------------------------------
             `OPCODE_JALR: begin
-                reg_write  = 1'b1;
-                alu_src    = 1'b1;   // imm
-                alu_opcode = `ALU_ADD;
-                // NOTE: PC+4 link-address writeback path is TBD.
-                //       ALU computes rs1 + imm = jump target.
+                reg_write   = 1'b1;
+                wb_src      = `WB_SRC_PC_PLUS4;  // rd ← pc+4 (link address)
+                branch_sel  = `BRANCH_JALR;      // unconditional jump
+                alu_opcode  = `ALU_NOP;          // target by JALR unit in EX
             end
 
             //-----------------------------------------------------------------
@@ -319,12 +317,12 @@ module decode (
     assign o_alu_opcode = alu_opcode;
     assign o_alu_src_a  = alu_src_a;
     assign o_alu_src    = alu_src;
-    assign o_branch     = branch;
+    assign o_branch_sel = branch_sel;
     assign o_mem_read   = mem_read;
     assign o_mem_write  = mem_write;
     assign o_mem_width  = mem_width;
     assign o_mem_sext   = mem_sext;
-    assign o_mem_to_reg = mem_to_reg;
+    assign o_wb_src     = wb_src;
     assign o_reg_write  = reg_write;
 
 endmodule

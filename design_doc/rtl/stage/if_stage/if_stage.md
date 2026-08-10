@@ -11,8 +11,8 @@ IF（Instruction Fetch）Stage 是 5 级流水线的第一级，负责在每个�
 ```
                    Pipeline Control
               ┌──────────────────────┐
-              │ flow_control.v       │
-              │ hazard_control.v     │
+              │ flow_ctrl.v       │
+              │ hazard_ctrl.v     │
               └──┬──────────┬────────┘
                  │          │
  branch_valid    │          │ stall
@@ -42,9 +42,9 @@ IF（Instruction Fetch）Stage 是 5 级流水线的第一级，负责在每个�
 | 信号 | 来源 | 说明 |
 |------|------|------|
 | `pc` | pc.v | 当前 PC |
-| `branch_target` | flow_control.v | 分支/跳转目标地址 |
-| `branch_valid` | flow_control.v | 分支/跳转是否有效 |
-| `stall` | hazard_control.v | 流水线暂停信号 |
+| `branch_target` | flow_ctrl.v | 分支/跳转目标地址 |
+| `branch_valid` | flow_ctrl.v | 分支/跳转是否有效 |
+| `stall` | hazard_ctrl.v | 流水线暂停信号 |
 
 **输出**：
 
@@ -94,8 +94,8 @@ IF（Instruction Fetch）Stage 是 5 级流水线的第一级，负责在每个�
 | `instruction` | inst_mem.v | 当前取出的指令 |
 | `pc` | pc.v | 当前指令对应的 PC |
 | `pc_plus4` | — | PC+4（用于后续阶段的地址计算） |
-| `stall` | hazard_control.v | 流水线暂停 |
-| `flush` | flow_control.v | 流水线冲刷 |
+| `stall` | hazard_ctrl.v | 流水线暂停 |
+| `flush` | flow_ctrl.v | 流水线冲刷 |
 
 **输出**：
 
@@ -128,9 +128,9 @@ IF（Instruction Fetch）Stage 是 5 级流水线的第一级，负责在每个�
 
 | 来源 | 信号 | 目标 | 说明 |
 |------|------|------|------|
-| hazard_control.v | `stall` | pc_next.v, if_id.v | 暂停取指和流水线推进 |
-| flow_control.v | `flush` | if_id.v | 冲刷无效指令 |
-| flow_control.v | `branch_valid`, `branch_target` | pc_next.v | 分支重定向 PC |
+| hazard_ctrl.v | `stall` | pc_next.v, if_id.v | 暂停取指和流水线推进 |
+| flow_ctrl.v | `flush` | if_id.v | 冲刷无效指令 |
+| flow_ctrl.v | `branch_valid`, `branch_target` | pc_next.v | 分支重定向 PC |
 
 ### 与 Resources 的交互
 

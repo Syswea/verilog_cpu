@@ -355,6 +355,27 @@ regfile
 
 ---
 
+## Write-Back and PC Update are Decoupled (dual-write)
+
+A jump instruction (JAL/JALR) writes TWO independent targets, in different
+pipeline stages, via two independent write enables:
+
+| Write target | Write enable | Driven by | When |
+|--------------|--------------|-----------|------|
+| `pc` → pc.v  | implicit: `stall` suppression + `branch_valid` | flow_ctrl.v → pc_next.v → pc.v | EX stage edge of the SAME cycle (branch redirect) |
+| `rd` → regfile | `reg_write` (decode-generated, passthrough) | wb.v (wb_src = `WB_SRC_PC_PLUS4`) | WB stage, 2 cycles later (link address pc+4) |
+
+- **pc write is control-plane**: happens at the EX-cycle edge when the
+  branch is evaluated; completely independent of the WB stage.
+- **rd write is datapath-plane**: pc+4 flows as a normal writeback value
+  through ex_mem → mem_wb → wb, written into regfile at the WB edge.
+- The two paths are fully decoupled: `reg_write` / `wb_src` never affect
+  pc; `branch_valid` / `stall` never affect regfile writes.
+- This is required for correct pipelining — an instruction's side effects
+  happen in their owning stages, not all at once.
+
+---
+
 # Pipeline Registers
 
 Pipeline registers separate every stage.
@@ -387,14 +408,14 @@ Pipeline control is intentionally separated from datapath.
 Modules
 
 ```
-flow_control.v
+flow_ctrl.v
 
-hazard_control.v
+hazard_ctrl.v
 ```
 
 ---
 
-## flow_control.v
+## flow_ctrl.v
 
 Responsibilities
 
@@ -430,7 +451,7 @@ ID/EX
 
 ---
 
-## hazard_control.v
+## hazard_ctrl.v
 
 Responsible for pipeline hazards.
 

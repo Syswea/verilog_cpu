@@ -16,8 +16,8 @@
 | `i_rst_n` | input | 1 | 全局复位 | 异步复位，低有效 |
 | `i_instruction` | input | 32 | `inst_mem.v` | 当前取出的指令字 |
 | `i_pc` | input | 32 | `pc.v` | 当前指令对应的 PC |
-| `i_flush` | input | 1 | `flow_control.v` | 流水线冲刷，高有效 |
-| `i_stall` | input | 1 | `hazard_control.v` | 流水线暂停，高有效 |
+| `i_flush` | input | 1 | `flow_ctrl.v` | 流水线冲刷，高有效 |
+| `i_stall` | input | 1 | `hazard_ctrl.v` | 流水线暂停，高有效 |
 
 ### 输出
 
@@ -82,7 +82,7 @@ always_ff @(posedge i_clk or negedge i_rst_n):
 - 属于 IF Stage 与 ID Stage 之间的边界寄存器，详见 [if_stage.md](../stage/if_stage/if_stage.md)
 - 输入来自 `inst_mem.v`（指令）和 `pc.v`（PC）
 - 输出送往 ID Stage 的 `decode.v`
-- 控制信号来自 `flow_control.v`（flush）和 `hazard_control.v`（stall）
+- 控制信号来自 `flow_ctrl.v`（flush）和 `hazard_ctrl.v`（stall）
 
 ## 未来扩展
 
